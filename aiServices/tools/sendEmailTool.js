@@ -15,35 +15,104 @@ const synthesisModel = new ChatGoogleGenerativeAI({
   apiKey: process.env.GOOGLE_API_KEY,
 });
 
-// 🔑 NEW: Function to search memory by ID, Subject, or Sender
+// 🔑 NEW: Function to search memory by ID, Subject, or Sender with multiple identifiers support
 function findUniqueEmail(query) {
   if (!query) return null;
 
   const lastEmails = getLastFetchedEmails();
-  const normalizedQuery = query.toLowerCase().trim();
+  console.log(`🔍 Searching for email with identifier: "${query}"`);
+  console.log(`📧 Available emails in memory: ${lastEmails.length}`);
 
-  // Try to match against ID, Subject, or Sender Name
-  const matches = lastEmails.filter((e) => {
-    // 1. Check ID
-    if (e.id === normalizedQuery) return true;
-    // 2. Check Subject inclusion
-    if (e.subject && e.subject.toLowerCase().includes(normalizedQuery))
-      return true;
-    // 3. Check Sender inclusion
-    if (e.from && e.from.toLowerCase().includes(normalizedQuery)) return true;
-    return false;
+  // Parse multiple identifiers separated by commas
+  const identifiers = query.split(',').map(id => id.trim().toLowerCase()).filter(id => id.length > 0);
+  console.log(`🔎 Parsed identifiers: ${JSON.stringify(identifiers)}`);
+
+  // Score-based matching for better results
+  const emailScores = lastEmails.map(email => {
+    let score = 0;
+    let matchedIdentifiers = [];
+
+    identifiers.forEach(identifier => {
+      // Check ID exact match (highest score)
+      if (email.id === identifier) {
+        score += 100;
+        matchedIdentifiers.push(`ID:${identifier}`);
+      }
+      
+      // Check sender email/name inclusion
+      if (email.from && email.from.toLowerCase().includes(identifier)) {
+        score += 50;
+        matchedIdentifiers.push(`From:${identifier}`);
+      }
+      
+      // Check subject inclusion
+      if (email.subject && email.subject.toLowerCase().includes(identifier)) {
+        score += 30;
+        matchedIdentifiers.push(`Subject:${identifier}`);
+      }
+      
+      // Check snippet inclusion (lower priority)
+      if (email.snippet && email.snippet.toLowerCase().includes(identifier)) {
+        score += 10;
+        matchedIdentifiers.push(`Snippet:${identifier}`);
+      }
+    });
+
+    return {
+      email,
+      score,
+      matchedIdentifiers,
+      matchCount: matchedIdentifiers.length
+    };
   });
 
-  if (matches.length === 1) {
-    return matches[0]; // Unique match found!
-  } else if (matches.length > 1) {
-    // Found multiple matches, return ambiguity error object
-    return {
-      error: `Found ${matches.length} emails matching "${query}". Please use a more specific phrase or the unique ID.`,
-    };
+  // Filter emails with at least one match
+  const matches = emailScores.filter(item => item.score > 0);
+  
+  // Sort by score (descending) and then by match count (descending)
+  matches.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    return b.matchCount - a.matchCount;
+  });
+
+  console.log(`🎯 Found ${matches.length} matching emails`);
+  
+  if (matches.length === 0) {
+    console.log(`❌ No matches found for "${query}"`);
+    return null;
   }
 
-  return null; // No match found
+  if (matches.length === 1) {
+    const match = matches[0];
+    console.log(`✅ Unique match found: "${match.email.subject}" from "${match.email.from}"`);
+    console.log(`   📊 Score: ${match.score}, Matched: ${match.matchedIdentifiers.join(', ')}`);
+    return match.email;
+  }
+
+  // Multiple matches - check if top match has significantly higher score
+  const topMatch = matches[0];
+  const secondMatch = matches[1];
+  
+  if (topMatch.score > secondMatch.score * 1.5) {
+    // Top match is significantly better
+    console.log(`✅ Best match found: "${topMatch.email.subject}" from "${topMatch.email.from}"`);
+    console.log(`   📊 Score: ${topMatch.score}, Matched: ${topMatch.matchedIdentifiers.join(', ')}`);
+    return topMatch.email;
+  }
+
+  // Too many similar matches
+  console.log(`⚠️  Multiple similar matches found for "${query}"`);
+  matches.slice(0, 3).forEach((match, index) => {
+    console.log(`   ${index + 1}. "${match.email.subject}" from "${match.email.from}" (Score: ${match.score})`);
+  });
+  
+  return {
+    error: `Found ${matches.length} similar emails matching "${query}". Top matches:\n` +
+           matches.slice(0, 3).map((match, index) => 
+             `${index + 1}. "${match.email.subject}" from "${match.email.from}"`
+           ).join('\n') + 
+           `\n\nPlease be more specific or use the exact Gmail ID.`,
+  };
 }
 
 async function generateBody(instruction) {
@@ -82,14 +151,18 @@ async function generateBody(instruction) {
 
 export const sendEmailTool = tool(
   async (input) => {
+    console.log("🔧 SendEmailTool called with input:", JSON.stringify(input, null, 2));
+    
     let toAddress = input.recipient;
     let finalSubject = input.subject;
     let sourceMessageId = null;
     const bodyInstruction = input.bodyInstruction; // 1. Determine if this is a REPLY or a NEW MESSAGE // We repurpose 'replyToId' as a general identifier ('identifier')
 
     const isReply = !!input.replyToId;
+    console.log(`📧 Is this a reply? ${isReply}`);
 
     if (isReply) {
+      console.log(`🔄 Processing reply to identifier: "${input.replyToId}"`);
       // --- REPLY PATH (Contextual Lookup) ---
 
       // 🔑 Use the flexible search function

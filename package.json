@@ -1,8 +1,20 @@
 {
-  "name": "backend",
-  "module": "index.ts",
-  "private": true,
+  "name": "email-agent",
+  "version": "1.0.0",
+  "description": "AI-powered email assistant CLI tool",
+  "main": "cli.js",
+  "module": "cli.js",
   "type": "module",
+  "bin": {
+    "email-agent": "./cli.js"
+  },
+  "scripts": {
+    "start": "bun run cli.js",
+    "dev": "bun run cli.js"
+  },
+  "keywords": ["email", "cli", "ai", "assistant", "gmail"],
+  "author": "Your Name",
+  "license": "MIT",
   "devDependencies": {
     "@types/bun": "latest"
   },

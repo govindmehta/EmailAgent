@@ -41,7 +41,58 @@ const model = new ChatGoogleGenerativeAI({
   apiKey: process.env.GOOGLE_API_KEY,
 });
 
+// Fallback categorization without AI
+function fallbackCategorizeEmails(emails) {
+  const categorized = {
+    "Job Alerts": [],
+    "Newsletters": [],
+    "Promotions": [],
+    "Personal": [],
+    "Work": [],
+    "Others": []
+  };
+
+  emails.forEach(email => {
+    const subject = email.subject?.toLowerCase() || '';
+    const from = email.from?.toLowerCase() || '';
+    const snippet = email.snippet?.toLowerCase() || '';
+    
+    // Add summary as snippet truncated to reasonable length
+    const emailWithSummary = {
+      ...email,
+      summary: email.snippet ? email.snippet.substring(0, 100) + (email.snippet.length > 100 ? "..." : "") : "No content available"
+    };
+    
+    // Simple keyword-based categorization
+    if (subject.includes('job') || subject.includes('career') || subject.includes('hiring') || 
+        from.includes('jobs') || from.includes('career') || from.includes('linkedin')) {
+      categorized["Job Alerts"].push(emailWithSummary);
+    } else if (subject.includes('newsletter') || subject.includes('digest') || subject.includes('weekly') ||
+               from.includes('newsletter') || from.includes('digest')) {
+      categorized["Newsletters"].push(emailWithSummary);
+    } else if (subject.includes('sale') || subject.includes('offer') || subject.includes('discount') ||
+               subject.includes('promo') || snippet.includes('unsubscribe')) {
+      categorized["Promotions"].push(emailWithSummary);
+    } else if (from.includes('work') || from.includes('team') || from.includes('project') ||
+               subject.includes('meeting') || subject.includes('project')) {
+      categorized["Work"].push(emailWithSummary);
+    } else if (from.includes('gmail.com') || from.includes('yahoo.com') || from.includes('hotmail.com')) {
+      categorized["Personal"].push(emailWithSummary);
+    } else {
+      categorized["Others"].push(emailWithSummary);
+    }
+  });
+
+  return categorized;
+}
+
 export async function categorizeEmails(emails) {
+  // Skip AI categorization if API key is missing or if there are too many emails
+  if (!process.env.GOOGLE_API_KEY || emails.length > 50) {
+    console.log("🔄 Using fallback categorization (API key missing or too many emails)");
+    return fallbackCategorizeEmails(emails);
+  }
+
   const systemPrompt = `
 You are an assistant that classifies emails and writes short summaries.
 Your task is to review the provided JSON list of emails and return a single, valid JSON object that categorizes them and provides summaries.
@@ -57,18 +108,32 @@ ${formatInstructions}
       new HumanMessage(JSON.stringify(emails, null, 2)),
     ]);
 
-    // 🔑 The model's response.content is now a guaranteed JavaScript object/JSON.
-    // We stringify it for tool consistency, but the underlying object is valid.
+    // Validate the response structure
+    if (!response || typeof response !== 'object') {
+      throw new Error("Invalid response structure from AI model");
+    }
+
     return response;
   } catch (err) {
-    console.error("Error in categorizeEmails execution:", err); // If the structured output still fails, return an empty structure
-    return {
-      "Job Alerts": [],
-      "Newsletters": [],
-      "Promotions": [],
-      "Personal": [],
-      "Work": [],
-      "Others": [],
-    };
+    console.error("Error in categorizeEmails execution:", err.message); 
+    
+    // Enhanced fallback: try to categorize manually without AI
+    console.log("🔄 Falling back to simple categorization...");
+    
+    try {
+      return fallbackCategorizeEmails(emails);
+    } catch (fallbackErr) {
+      console.error("Fallback categorization also failed:", fallbackErr.message);
+      
+      // If everything fails, return empty structure
+      return {
+        "Job Alerts": [],
+        "Newsletters": [],
+        "Promotions": [],
+        "Personal": [],
+        "Work": [],
+        "Others": [],
+      };
+    }
   }
 }

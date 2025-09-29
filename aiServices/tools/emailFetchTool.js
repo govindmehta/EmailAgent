@@ -7,38 +7,49 @@ import { setLastFetchedEmails } from "../memory.js";
 
 export const emailFetchTool = tool(
   async (input) => {
-    const { userId, limit, pageToken } = input; // 1. Fetch raw emails using Gmail API pagination
-    const { emails, nextPageToken } = await getEmailsList(
-      userId,
-      limit,
-      pageToken
-    );
+    const { userId, limit, pageToken } = input; 
+    
+    try {
+      // 1. Fetch raw emails using Gmail API pagination
+      const { emails, nextPageToken } = await getEmailsList(
+        userId,
+        limit,
+        pageToken
+      );
 
-    if (emails.length === 0) {
-      return "No emails found.";
+      if (emails.length === 0) {
+        return "No emails found.";
+      }
+      
+      // 🔑 WRITE RAW EMAILS TO MEMORY
+      setLastFetchedEmails(emails); 
+
+      // Try categorization with improved error handling
+      console.log(`📧 Categorizing ${emails.length} emails...`);
+      const categorized = await categorizeEmails(emails); 
+
+      // Check if the categorization returned the specific error state object
+      const isEmptyStructure = Object.values(categorized).every(
+        (arr) => Array.isArray(arr) && arr.length === 0
+      );
+
+      if (emails.length > 0 && isEmptyStructure) {
+        return "ERROR: Categorization failed due to an external service error. Please try again shortly.";
+      }
+
+      let output = JSON.stringify(categorized, null, 2);
+
+      if (nextPageToken) {
+        //Use a clear delimiter for the LLM to identify the token
+        output += `\n\n---NEXT_PAGE_TOKEN_START---${nextPageToken}---NEXT_PAGE_TOKEN_END---`;
+      }
+
+      return output;
+      
+    } catch (error) {
+      console.error("Error in emailFetchTool:", error.message);
+      return `ERROR: Failed to fetch emails - ${error.message}. Please try again.`;
     }
-    // 🔑 WRITE RAW EMAILS TO MEMORY
-    setLastFetchedEmails(emails); 
-
-    // If categorization fails, we get a specific return value
-    const categorized = await categorizeEmails(emails); // Check if the categorization returned the specific error state object
-
-    const isEmptyStructure = Object.values(categorized).every(
-      (arr) => Array.isArray(arr) && arr.length === 0
-    );
-
-    if (emails.length > 0 && isEmptyStructure) {
-      return "ERROR: Categorization failed due to an external service error. Please try again shortly.";
-    }
-
-    let output = JSON.stringify(categorized, null, 2);
-
-    if (nextPageToken) {
-      //Use a clear delimiter for the LLM to identify the token
-      output += `\n\n---NEXT_PAGE_TOKEN_START---${nextPageToken}---NEXT_PAGE_TOKEN_END---`;
-    }
-
-    return output;
   },
   {
     name: "fetchEmails",

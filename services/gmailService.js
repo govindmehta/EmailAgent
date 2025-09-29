@@ -87,11 +87,12 @@ async function getEmailsList(userId, limit, pageToken = null) {
     const auth = await getAuthClient();
     const gmail = google.gmail({ version: "v1", auth });
 
-    // Fetch messages with Gmail pagination
+    // Fetch messages with Gmail pagination - only from INBOX
     const res = await gmail.users.messages.list({
       userId: "me",
       maxResults: limit,
       pageToken, // null = first page, otherwise continue
+      q: "in:inbox", // Only fetch emails from inbox (received emails)
     });
 
     const messages = res.data.messages || [];
@@ -114,18 +115,30 @@ async function getEmailsList(userId, limit, pageToken = null) {
         const from = getHeader(headers, "From");
         const snippet = emailRes.data.snippet;
         const body = getBody(payload);
-        const links = extractLinks(body);
+        // const links = extractLinks(body);
         const gmailLink = `https://mail.google.com/mail/u/0/#inbox/${msg.id}`;
-        return { id: msg.id, subject, from, snippet, links, gmailLink };
+        return { id: msg.id, subject, from, snippet, gmailLink };
       } catch (err) {
-        console.error(`Failed to fetch message ${msg.id}:`, err);
+        // Silently handle inaccessible emails (deleted, moved, etc.)
+        // Only log for debugging, don't show to user
+        if (process.env.NODE_ENV === 'development') {
+          console.error(`Failed to fetch message ${msg.id}:`, err.message);
+        }
         return null; // skip this one
       }
     });
 
     const emails = await Promise.all(emailPromises);
+    const filteredEmails = emails.filter((e) => e !== null); // filter out failures
+    
+    // Provide user feedback if some emails couldn't be accessed
+    const failedCount = emails.length - filteredEmails.length;
+    if (failedCount > 0 && process.env.NODE_ENV !== 'development') {
+      console.log(`ℹ️  Note: ${failedCount} email(s) were skipped (may have been deleted or moved).`);
+    }
+    
     return {
-      emails: emails.filter((e) => e !== null), // filter out failures
+      emails: filteredEmails,
       nextPageToken,
     };
   } catch (err) {
