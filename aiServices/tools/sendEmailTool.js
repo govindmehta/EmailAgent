@@ -4,7 +4,8 @@ import { sendEmail } from "../../services/gmailService.js";
 import { tool } from "@langchain/core/tools";
 import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
 import { z } from "zod";
-import { findEmailById } from "../memory.js";
+// 🔑 Import the memory getter function
+import { getLastFetchedEmails } from "../memory.js";
 import { HumanMessage } from "langchain";
 
 // Model instance specifically for body synthesis
@@ -14,81 +15,117 @@ const synthesisModel = new ChatGoogleGenerativeAI({
   apiKey: process.env.GOOGLE_API_KEY,
 });
 
+// 🔑 NEW: Function to search memory by ID, Subject, or Sender
+function findUniqueEmail(query) {
+  if (!query) return null;
 
-async function generateBody(instruction) {
-    const MAX_RETRIES = 3;
-    const FALLBACK_BODY = `[Automated Response]: Regarding your request, ${instruction}`;
+  const lastEmails = getLastFetchedEmails();
+  const normalizedQuery = query.toLowerCase().trim();
 
-    const prompt = `
-    You are an AI email composer. Your task is to turn the following brief instruction into a polite, professional, and complete email body. 
-    Use appropriate greetings, closings, and formatting (newlines for paragraphs).
-    At the end of email add name as "Govind Mehta".
+  // Try to match against ID, Subject, or Sender Name
+  const matches = lastEmails.filter((e) => {
+    // 1. Check ID
+    if (e.id === normalizedQuery) return true;
+    // 2. Check Subject inclusion
+    if (e.subject && e.subject.toLowerCase().includes(normalizedQuery))
+      return true;
+    // 3. Check Sender inclusion
+    if (e.from && e.from.toLowerCase().includes(normalizedQuery)) return true;
+    return false;
+  });
 
-    INSTRUCTION: "${instruction}"
-    `;
+  if (matches.length === 1) {
+    return matches[0]; // Unique match found!
+  } else if (matches.length > 1) {
+    // Found multiple matches, return ambiguity error object
+    return {
+      error: `Found ${matches.length} emails matching "${query}". Please use a more specific phrase or the unique ID.`,
+    };
+  }
 
-    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-        try {
-            const response = await synthesisModel.invoke([new HumanMessage(prompt)]);
-            return response.content; // Success!
-        } catch (error) {
-            console.warn(`[Synthesis] Attempt ${attempt} failed with error: ${error.status || error.message}. Retrying...`);
-            if (attempt === MAX_RETRIES) {
-                console.error(`[Synthesis] All ${MAX_RETRIES} attempts failed. Using fallback body.`);
-                // Return the raw instruction as a safe fallback
-                return FALLBACK_BODY; 
-            }
-            // Wait a moment before retrying
-            await new Promise(resolve => setTimeout(resolve, 1000 * attempt)); 
-        }
-    }
-    // Should be unreachable, but good practice to handle
-    return FALLBACK_BODY;
+  return null; // No match found
 }
 
+async function generateBody(instruction) {
+  const MAX_RETRIES = 3;
+  const FALLBACK_BODY = `[Automated Response]: Regarding your request, ${instruction}`;
+
+  const prompt = `
+   You are an AI email composer. Your task is to turn the following brief instruction into a polite, professional, and complete email body. 
+   Use appropriate greetings, closings, and formatting (newlines for paragraphs).
+  At the end of email add name as "Govind Mehta".
+
+  INSTRUCTION: "${instruction}"
+  `;
+
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const response = await synthesisModel.invoke([new HumanMessage(prompt)]);
+      return response.content; // Success!
+    } catch (error) {
+      console.warn(
+        `[Synthesis] Attempt ${attempt} failed with error: ${
+          error.status || error.message
+        }. Retrying...`
+      );
+      if (attempt === MAX_RETRIES) {
+        console.error(
+          `[Synthesis] All ${MAX_RETRIES} attempts failed. Using fallback body.`
+        );
+        return FALLBACK_BODY;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
+    }
+  }
+  return FALLBACK_BODY;
+}
 
 export const sendEmailTool = tool(
-  async ({ recipient, subject, bodyInstruction, replyToId }) => {
-    let toAddress = recipient;
-    let finalSubject = subject;
+  async (input) => {
+    let toAddress = input.recipient;
+    let finalSubject = input.subject;
     let sourceMessageId = null;
+    const bodyInstruction = input.bodyInstruction; // 1. Determine if this is a REPLY or a NEW MESSAGE // We repurpose 'replyToId' as a general identifier ('identifier')
 
-    // CONTEXTUAL LOGIC (if replyToId is provided)
-    if (replyToId) {
-      const targetEmail = findEmailById(replyToId);
+    const isReply = !!input.replyToId;
+
+    if (isReply) {
+      // --- REPLY PATH (Contextual Lookup) ---
+
+      // 🔑 Use the flexible search function
+      const result = findUniqueEmail(input.replyToId);
+
+      if (result && result.error) {
+        return result.error; // Ambiguity error (multiple matches)
+      }
+      const targetEmail = result; // This is the unique email object
 
       if (!targetEmail) {
-        return `Error: Could not find email with ID '${replyToId}' in the recent context. Cannot reply.`;
-      }
+        return `Error: The email matching "${input.replyToId}" could not be found in the recent context.`;
+      } // Infer 'to' address from the original 'from' header
 
-      // Infer 'to' and 'subject' for a reply
       const fromMatch = targetEmail.from.match(/<([^>]+)>/);
-      toAddress = fromMatch ? fromMatch[1] : targetEmail.from.trim();
+      toAddress = fromMatch ? fromMatch[1] : targetEmail.from.trim(); // Infer subject with "Re:"
 
-      // Ensure subject starts with "Re:"
-      if (targetEmail.subject) {
-        finalSubject = targetEmail.subject.startsWith("Re:")
-          ? targetEmail.subject
-          : `Re: ${targetEmail.subject}`;
-      } else {
-        finalSubject = `Re: (No Original Subject)`;
-      }
-
+      finalSubject = targetEmail.subject.startsWith("Re:")
+        ? targetEmail.subject
+        : `Re: ${targetEmail.subject || "(No Subject)"}`;
       sourceMessageId = targetEmail.id;
-    }
-
-    // SYNTHESIZE BODY
+    } else {
+      // --- NEW MESSAGE PATH (Explicit Arguments) ---
+      if (!toAddress || !finalSubject) {
+        return "Error: Cannot send a new message without a recipient and subject.";
+      } // sourceMessageId remains null for new messages.
+    } // SYNTHESIZE BODY
     const finalBody = await generateBody(bodyInstruction);
-    // console.log("[SendEmailTool] Generated Email Body:\n", finalBody);
 
     try {
       // SEND EMAIL
       await sendEmail(toAddress, finalSubject, finalBody, sourceMessageId);
 
-    //   console.log("hello");
       let status = `Email successfully sent to ${toAddress}`;
-      if (replyToId) {
-        status += ` (as a reply to ID: ${replyToId}).`;
+      if (isReply) {
+        status += ` (as a reply, based on identifier: ${input.replyToId}).`;
       } else {
         status += ` (as a new message).`;
       }
@@ -100,29 +137,30 @@ export const sendEmailTool = tool(
   {
     name: "sendEmail",
     description:
-      "Sends a new email OR replies to a recently fetched email. Requires the recipient, subject, and body instruction.",
+      "Sends a new email OR replies to a recently fetched email. For replies, provide a unique subject line, sender name, or ID.",
     schema: z.object({
-      // Recipient and Subject are always required for the tool call
-      recipient: z
-        .string()
-        .email()
-        .describe("The email address of the primary recipient."),
-      subject: z
-        .string()
-        .describe(
-          "The subject line of the email. For NEW emails, use the subject provided by the user."
-        ),
+      // Required for ALL calls
       bodyInstruction: z
         .string()
         .describe(
           "The user's instruction on what the message body should convey (e.g., 'ask about the meeting time')."
+        ), // Recipient and Subject are required for NEW messages, optional for reply (as they are inferred).
+      recipient: z
+        .string()
+        .email()
+        .optional()
+        .describe(
+          "The email address of the primary recipient (required for NEW message)."
         ),
-      // This is OPTIONAL, only provided if the user is replying.
+      subject: z
+        .string()
+        .optional()
+        .describe("The subject line of the email (required for NEW message)."), // REQUIRED for REPLY action, acts as the natural language identifier
       replyToId: z
         .string()
         .optional()
         .describe(
-          "The unique Gmail ID of the email being replied to, if available in the user's request."
+          "A unique identifier (Subject, Sender Name, or ID) of the email being replied to (REQUIRED for replies)."
         ),
     }),
   }

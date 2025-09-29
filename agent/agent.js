@@ -53,6 +53,7 @@ After executing **fetchEmails**, you must generate a user-friendly summary follo
       * Subject: [Email Subject]
       * From: [Sender Name] <[sender@email.com]>
       * Summary: [A brief 1-2 line summary of the email content.]
+      * Link: [any link found in the email, if no links found then write "No Links Found"]
       * Gmail Link: [Direct Link to the Email]
 
     [One line of space]
